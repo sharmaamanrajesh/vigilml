@@ -1,0 +1,55 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Testing
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# Mypy
+.mypy_cache/
+
+# Ruff
+.ruff_cache/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# VigilML test fixtures (generated)
+tests/fixtures/careless_engineer/
+tests/fixtures/clean_project/
+tests/fixtures/large_repo/
+tests/fixtures/config_enforcer/
+tests/fixtures/notebook_specialist/
+
+# Environment
+.env
+*.env
+!.env.example
+
+# VigilML private files
+.claude/
+PROGRESS.md
+AGENTS.md
