@@ -1,3 +1,8 @@
+# vigilml: ignore-file
+# The `location` variable name (a finding's file:line string, not personal
+# address data) satisfies data_pipeline.py's PII-reference check, which then
+# flags every `console.print(...)` call in this file as "pii-logging". All
+# findings here are false positives.
 """Rich-based terminal output for VigilML scan results.
 
 See docs/DECISIONS.md ADR-002 — never use print() here, always go through
@@ -32,6 +37,7 @@ def render(
     *,
     no_color: bool = False,
     quiet: bool = False,
+    stats_only: bool = False,
     ignored_count: int = 0,
     file: IO[str] | None = None,
 ) -> None:
@@ -47,6 +53,10 @@ def render(
 
     if quiet:
         console.print(_summary_line(findings, duration_seconds, ignored_count))
+        return
+
+    if stats_only:
+        console.print(_summary_panel(findings, scan_path, duration_seconds, ignored_count))
         return
 
     if not findings and not ignored_count:

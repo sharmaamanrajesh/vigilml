@@ -19,13 +19,17 @@ def build_payload(
     scan_path: Path,
     duration_seconds: float,
     ignored_findings: list[dict[str, str]] | None = None,
+    scanner_coverage: dict[str, dict[str, int]] | None = None,
 ) -> dict[str, Any]:
     """Build the JSON-serialisable payload for a scan's findings.
 
     `ignored_findings` are findings suppressed by a `.vigilml.yml` ignore
     rule — each dict has "rule", "file", "reason" (see docs/ARCHITECTURE.md).
+    `scanner_coverage` maps each scanner name that ran to
+    `{"files_scanned": N, "findings": N}`.
     """
     ignored_findings = ignored_findings or []
+    scanner_coverage = scanner_coverage or {}
     counts: dict[str, int] = dict.fromkeys(_SEVERITY_ORDER, 0)
     for finding in findings:
         counts[finding.severity] += 1
@@ -40,6 +44,7 @@ def build_payload(
         "summary": counts,
         "findings": [_finding_to_dict(finding) for finding in findings],
         "ignored_findings": ignored_findings,
+        "scanner_coverage": scanner_coverage,
     }
 
 
@@ -66,6 +71,7 @@ def render(
     duration_seconds: float,
     *,
     ignored_findings: list[dict[str, str]] | None = None,
+    scanner_coverage: dict[str, dict[str, int]] | None = None,
     file: IO[str] | None = None,
 ) -> None:
     """Write the JSON payload to `file` (defaults to stdout) and nothing else.
@@ -73,5 +79,7 @@ def render(
     Rich's Console is not used here — it would treat "[" as markup and wrap
     long lines to the terminal width, both of which would corrupt the JSON.
     """
-    payload = build_payload(findings, scan_path, duration_seconds, ignored_findings)
+    payload = build_payload(
+        findings, scan_path, duration_seconds, ignored_findings, scanner_coverage
+    )
     (file or sys.stdout).write(json.dumps(payload, indent=2) + "\n")

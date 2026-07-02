@@ -25,6 +25,9 @@ RULE_NAME_BY_FINDING_TYPE: dict[str, str] = {
     "model_file": "model_files",
     "cloud": "cloud",
     "dependency": "dependencies",
+    "prompt_injection": "prompt_injection",
+    "data_pipeline": "data_pipeline",
+    "notebook_risk": "notebook_risks",
 }
 
 DEFAULT_EXCLUDE_PATHS: tuple[str, ...] = (

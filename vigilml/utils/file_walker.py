@@ -20,11 +20,20 @@ DEFAULT_INCLUDE_EXTENSIONS: frozenset[str] = frozenset({".py", ".ipynb"})
 def walk_files(
     root: Path,
     include_extensions: frozenset[str] | None = None,
+    include_filenames: frozenset[str] | None = None,
+    include_name_substrings: frozenset[str] | None = None,
     exclude_dirs: frozenset[str] | None = None,
 ) -> Iterator[Path]:
     """Yield files under `root` whose suffix is in `include_extensions`.
 
-    When `root` is a regular file, yield it directly (if its suffix matches)
+    `include_filenames` additionally matches on the full file name, for
+    extension-less files (`Dockerfile`) or dotfiles whose "suffix" (per
+    `Path.suffix`) doesn't equal the name (`.env`, `.env.local`).
+    `include_name_substrings` matches case-insensitively on any substring
+    of the file name, for extension-less files whose name varies
+    (`TestDockerfile`, `backend.Dockerfile.prod`).
+
+    When `root` is a regular file, yield it directly (if it matches)
     instead of walking. When `root` is a directory, recurse as normal.
     Directories named in `exclude_dirs`, directories ending in `.egg-info`,
     and paths matched by a `.gitignore` at `root` (if present) are never
@@ -33,9 +42,11 @@ def walk_files(
     extensions = (
         include_extensions if include_extensions is not None else DEFAULT_INCLUDE_EXTENSIONS
     )
+    filenames = include_filenames if include_filenames is not None else frozenset()
+    substrings = include_name_substrings if include_name_substrings is not None else frozenset()
 
     if root.is_file():
-        if root.suffix in extensions:
+        if _matches(root, extensions, filenames, substrings):
             yield root
         return
 
@@ -45,13 +56,29 @@ def walk_files(
     excluded = exclude_dirs if exclude_dirs is not None else DEFAULT_EXCLUDE_DIRS
     gitignore_patterns = _load_gitignore_patterns(root)
 
-    yield from _walk(root, root, extensions, excluded, gitignore_patterns)
+    yield from _walk(root, root, extensions, filenames, substrings, excluded, gitignore_patterns)
+
+
+def _matches(
+    entry: Path,
+    extensions: frozenset[str],
+    filenames: frozenset[str],
+    substrings: frozenset[str],
+) -> bool:
+    if entry.suffix in extensions or entry.name in filenames:
+        return True
+    if substrings:
+        lowered = entry.name.lower()
+        return any(substring in lowered for substring in substrings)
+    return False
 
 
 def _walk(
     directory: Path,
     root: Path,
     extensions: frozenset[str],
+    filenames: frozenset[str],
+    substrings: frozenset[str],
     excluded: frozenset[str],
     gitignore_patterns: list[str],
 ) -> Iterator[Path]:
@@ -67,8 +94,10 @@ def _walk(
         if entry.is_dir():
             if entry.name in excluded or entry.suffix == ".egg-info":
                 continue
-            yield from _walk(entry, root, extensions, excluded, gitignore_patterns)
-        elif entry.is_file() and entry.suffix in extensions:
+            yield from _walk(
+                entry, root, extensions, filenames, substrings, excluded, gitignore_patterns
+            )
+        elif entry.is_file() and _matches(entry, extensions, filenames, substrings):
             yield entry
 
 
