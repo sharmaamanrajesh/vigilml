@@ -226,7 +226,6 @@ _BIGQUERY_CREATE_DATASET_RE = re.compile(r"\.create_dataset\s*\(")
 _AZURE_CLIENT_RE = re.compile(r"\b(?:BlobServiceClient|ContainerClient)\s*\(")
 _HTTP_DOWNLOAD_RE = re.compile(r"(?:requests\.get|urlopen|urlretrieve)\s*\(\s*[\"']http://")
 _DISK_SAVE_RE = re.compile(r"open\([^)]*[\"'](?:w|wb|ab)[\"']")
-_DOWNLOAD_CALL_RE = re.compile(r"\b(?:requests\.get|urlretrieve)\s*\(")
 _ROUTE_DECORATOR_RE = re.compile(
     r"@(?:app|router)\.(?:route|get|post|put|delete|patch)\s*\("
 )
@@ -262,10 +261,6 @@ _AZURE_CONTAINER_PUBLIC_REMEDIATION = (
 _HTTP_DOWNLOAD_REMEDIATION = (
     "Use https:// URLs for all downloads. Additionally verify file "
     "integrity with a SHA256 checksum after downloading."
-)
-_MISSING_CHECKSUM_REMEDIATION = (
-    "After downloading, verify the file's SHA256 hash against a "
-    "known-good value: import hashlib; hashlib.sha256(data).hexdigest()"
 )
 _SERVING_AUTH_REMEDIATION = (
     "Add authentication to all model serving endpoints. For FastAPI use "
@@ -403,21 +398,6 @@ def _check_http_download_to_disk(text: str) -> Iterator[tuple[str, Severity, str
         )
 
 
-def _check_missing_checksum(text: str) -> Iterator[tuple[str, Severity, str, str, int]]:
-    if "hashlib" in text:
-        return
-    for match in _DOWNLOAD_CALL_RE.finditer(text):
-        line, _ = _line_and_column(text, match.start())
-        yield (
-            "missing-checksum-verification",
-            "MEDIUM",
-            "File downloaded without checksum verification — integrity of "
-            "downloaded model weights or dataset cannot be confirmed",
-            _MISSING_CHECKSUM_REMEDIATION,
-            line,
-        )
-
-
 def _check_serving_auth(text: str) -> Iterator[tuple[str, Severity, str, str, int]]:
     lowered = text.lower()
     if any(keyword in lowered for keyword in _AUTH_KEYWORDS):
@@ -443,7 +423,6 @@ def _scan_file_level(text: str) -> Iterator[tuple[str, Severity, str, str, int]]
     yield from _check_bigquery_access(text)
     yield from _check_azure_container_public_access(text)
     yield from _check_http_download_to_disk(text)
-    yield from _check_missing_checksum(text)
     yield from _check_serving_auth(text)
 
 

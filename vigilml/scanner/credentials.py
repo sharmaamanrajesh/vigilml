@@ -87,6 +87,10 @@ class _VarAssignmentRule:
     common, non-secret keyword-argument names (e.g. boto3's
     `Key="path/in/bucket"`), whereas service-specific env var names are
     unambiguous regardless of context.
+    `match_segments` requires keywords to match whole underscore/camelCase
+    segments of the variable name instead of substrings — used only by the
+    generic rule so that ML identifiers like `tokenized` or
+    `tokens_per_iter` don't match the keyword TOKEN.
     """
 
     rule: str
@@ -97,6 +101,7 @@ class _VarAssignmentRule:
     min_length: int = 16
     check_placeholder: bool = False
     require_assignment_context: bool = False
+    match_segments: bool = False
 
 
 def _secrets_manager_remediation(var_hint: str) -> str:
@@ -431,6 +436,7 @@ _VAR_RULES: tuple[_VarAssignmentRule, ...] = (
         min_length=17,
         check_placeholder=True,
         require_assignment_context=True,
+        match_segments=True,
     ),
 )
 
@@ -451,6 +457,23 @@ def _redact(value: str) -> str:
 def _is_placeholder(value: str) -> bool:
     lowered = value.lower()
     return any(word in lowered for word in _PLACEHOLDER_WORDS)
+
+
+_CAMEL_BOUNDARY_RE = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
+
+
+def _identifier_segments(identifier: str) -> str:
+    """Return `identifier` as an underscore-delimited, uppercased segment
+    string wrapped in underscores (`tokensPerIter` -> `_TOKENS_PER_ITER_`),
+    so multi-segment keywords like API_KEY can be tested with a substring
+    check that cannot match inside a larger word."""
+    segmented = _CAMEL_BOUNDARY_RE.sub("_", identifier)
+    return f"_{segmented.upper().strip('_')}_"
+
+
+def _matches_keyword_segments(identifier: str, keywords: tuple[str, ...]) -> bool:
+    segments = _identifier_segments(identifier)
+    return any(f"_{keyword}_" in segments for keyword in keywords)
 
 
 def _is_assignment_context(line: str, start: int, end: int) -> bool:
@@ -474,15 +497,23 @@ def _is_assignment_context(line: str, start: int, end: int) -> bool:
     return not remainder.startswith(",")
 
 
-def _find_assignments(line: str) -> Iterator[tuple[str, str, int, int, bool]]:
-    """Yield (identifier, value, start, end, is_assignment_context) for each
-    assignment-like expression in `line`."""
+def _find_assignments(line: str) -> Iterator[tuple[str, str, int, int, bool, bool]]:
+    """Yield (identifier, value, start, end, is_assignment_context,
+    is_quoted) for each assignment-like expression in `line`."""
     for match in _ASSIGNMENT_PATTERN.finditer(line):
-        value = match.group(3) if match.group(3) is not None else match.group(4)
+        is_quoted = match.group(3) is not None
+        value = match.group(3) if is_quoted else match.group(4)
         if not value:
             continue
         start, end = match.start(), match.end()
-        yield match.group(1), value, start, end, _is_assignment_context(line, start, end)
+        yield (
+            match.group(1),
+            value,
+            start,
+            end,
+            _is_assignment_context(line, start, end),
+            is_quoted,
+        )
 
 
 def _match_var_rule(
@@ -490,7 +521,10 @@ def _match_var_rule(
 ) -> _VarAssignmentRule | None:
     upper = identifier.upper()
     for rule in _VAR_RULES:
-        if not any(keyword in upper for keyword in rule.keywords):
+        if rule.match_segments:
+            if not _matches_keyword_segments(identifier, rule.keywords):
+                continue
+        elif not any(keyword in upper for keyword in rule.keywords):
             continue
         if rule.require_assignment_context and not is_assignment_context:
             continue
@@ -506,8 +540,11 @@ def _overlaps(start: int, end: int, spans: list[tuple[int, int]]) -> bool:
     return any(start < s_end and end > s_start for s_start, s_end in spans)
 
 
-def _scan_line(line: str) -> Iterator[tuple[_CredentialRule | _VarAssignmentRule, str, int]]:
-    """Yield (rule, matched value, 1-based column) for each credential found in `line`."""
+def _scan_line(
+    line: str, is_python: bool = False
+) -> Iterator[tuple[_CredentialRule | _VarAssignmentRule, str, int]]:
+    """Yield (rule, matched value, 1-based column) for each credential found
+    in `line`. `is_python` marks Python source (.py files, notebook cells)."""
     matched_spans: list[tuple[int, int]] = []
 
     for rule in _RULES:
@@ -517,8 +554,14 @@ def _scan_line(line: str) -> Iterator[tuple[_CredentialRule | _VarAssignmentRule
             matched_spans.append((match.start(), match.end()))
             yield rule, value, match.start() + 1
 
-    for identifier, value, start, end, is_assignment_context in _find_assignments(line):
+    for identifier, value, start, end, is_assignment_context, is_quoted in _find_assignments(line):
         if _overlaps(start, end, matched_spans):
+            continue
+        # In Python source an unquoted right-hand side is a code expression
+        # (`tokens_per_iter = gradient_accumulation_steps * batch`), never a
+        # hardcoded string secret. In .env/YAML/JSON bare values are data
+        # and stay eligible.
+        if is_python and not is_quoted:
             continue
 
         var_rule = _match_var_rule(identifier, value, is_assignment_context)
@@ -544,8 +587,9 @@ def _scan_text_file(path: Path) -> list[Finding]:
         return []
 
     findings = []
+    is_python = path.suffix == ".py"
     for line_number, line in enumerate(text.splitlines(), start=1):
-        for rule, value, column in _scan_line(line):
+        for rule, value, column in _scan_line(line, is_python=is_python):
             findings.append(_build_finding(rule, path, line_number, column, value))
     return filter_suppressed(findings, text)
 
@@ -568,7 +612,7 @@ def _scan_notebook(path: Path) -> list[Finding]:
         text = "".join(source) if isinstance(source, list) else source
 
         for line_number, line in enumerate(text.splitlines(), start=1):
-            for rule, value, column in _scan_line(line):
+            for rule, value, column in _scan_line(line, is_python=True):
                 findings.append(
                     _build_finding(rule, path, line_number, column, value, cell=cell_number)
                 )

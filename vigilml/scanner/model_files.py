@@ -12,6 +12,7 @@ files and notebook code-cell sources (see docs/DECISIONS.md ADR-006).
 
 from __future__ import annotations
 
+import ast
 import json
 import re
 from collections.abc import Iterator
@@ -158,8 +159,10 @@ _SHELVE_OPEN_RE = re.compile(r"shelve\.open\(")
 _MARSHAL_LOADS_RE = re.compile(r"marshal\.loads\(")
 _OS_SYSTEM_RE = re.compile(r"os\.system\(")
 _SHELL_TRUE_RE = re.compile(r"shell\s*=\s*True")
-_EVAL_RE = re.compile(r"\beval\(([^)]*)\)")
-_EXEC_RE = re.compile(r"\bexec\(([^)]*)\)")
+# The negative lookbehind excludes method calls such as PyTorch's
+# `model.eval()` — only the eval/exec builtins are dangerous.
+_EVAL_RE = re.compile(r"(?<![\w.])eval\(([^)]*)\)")
+_EXEC_RE = re.compile(r"(?<![\w.])exec\(([^)]*)\)")
 _TRUST_REMOTE_CODE_RE = re.compile(r"trust_remote_code\s*=\s*True")
 
 _PICKLE_REMEDIATION = (
@@ -459,6 +462,289 @@ def _scan_calls(text: str) -> Iterator[tuple[str, Severity, str, str, int, int]]
                 yield rule, severity, message, remediation, line, column
 
 
+# ---------------------------------------------------------------------------
+# AST-based scanning — the primary path for Python source. Parsing instead
+# of pattern-matching means comments, docstrings, and method calls such as
+# PyTorch's `model.eval()` can never be mistaken for the eval() builtin,
+# and call arguments are inspected structurally. The regex scan above is
+# kept only as a fallback for source that does not parse.
+# ---------------------------------------------------------------------------
+
+_CodeFinding = tuple[str, Severity, str, str, int, int]
+
+# `np` is seeded so `np.load(..., allow_pickle=True)` is caught in notebook
+# cells whose `import numpy as np` lives in a different cell.
+_DEFAULT_ALIASES: dict[str, str] = {"np": "numpy"}
+
+_HF_MODULES = frozenset(
+    {"transformers", "huggingface_hub", "diffusers", "sentence_transformers", "peft"}
+)
+
+_SIMPLE_CALL_RULES: dict[str, tuple[str, Severity, str, str]] = {
+    "pickle.loads": ("pickle-loads", "HIGH", "pickle.loads() call detected", _PICKLE_REMEDIATION),
+    "pickle.load": ("pickle-load", "HIGH", "pickle.load() call detected", _PICKLE_REMEDIATION),
+    "dill.loads": (
+        "dill-loads",
+        "HIGH",
+        "dill.loads() call detected — dill deserialises arbitrary Python objects "
+        "and can execute malicious code",
+        _DILL_CALL_REMEDIATION,
+    ),
+    "dill.load": (
+        "dill-load",
+        "HIGH",
+        "dill.load() call detected — dill deserialises arbitrary Python objects "
+        "and can execute malicious code",
+        _DILL_CALL_REMEDIATION,
+    ),
+    "shelve.open": (
+        "shelve-open",
+        "MEDIUM",
+        "shelve.open() detected — Python shelve uses pickle internally and "
+        "carries the same deserialisation risks",
+        _SHELVE_REMEDIATION,
+    ),
+    "marshal.loads": (
+        "marshal-loads",
+        "HIGH",
+        "marshal.loads() detected — marshal deserialises Python bytecode and "
+        "can execute arbitrary code",
+        _MARSHAL_REMEDIATION,
+    ),
+    "os.system": (
+        "os-system",
+        "HIGH",
+        "os.system() call detected — vulnerable to command injection if any "
+        "part of the command string is user-controlled",
+        _OS_SYSTEM_REMEDIATION,
+    ),
+}
+
+
+def _collect_imports(tree: ast.AST) -> tuple[dict[str, str], bool]:
+    """Return (alias map, True if a HuggingFace library is imported).
+
+    The alias map resolves local names to what they were bound to at import
+    time, e.g. `import numpy as np` maps np -> numpy and `from torch import
+    load as tl` maps tl -> torch.load.
+    """
+    aliases = dict(_DEFAULT_ALIASES)
+    has_hf_import = False
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name.split(".")[0] in _HF_MODULES:
+                    has_hf_import = True
+                if alias.asname:
+                    aliases[alias.asname] = alias.name
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            if node.module.split(".")[0] in _HF_MODULES:
+                has_hf_import = True
+            for alias in node.names:
+                aliases[alias.asname or alias.name] = f"{node.module}.{alias.name}"
+    return aliases, has_hf_import
+
+
+def _resolved_call_name(func: ast.expr, aliases: dict[str, str]) -> str | None:
+    """Return the dotted name a call targets with import aliases resolved,
+    or None when the target is not a plain name/attribute chain."""
+    parts: list[str] = []
+    node = func
+    while isinstance(node, ast.Attribute):
+        parts.append(node.attr)
+        node = node.value
+    if not isinstance(node, ast.Name):
+        return None
+    parts.append(node.id)
+    parts.reverse()
+    parts[0] = aliases.get(parts[0], parts[0])
+    return ".".join(parts)
+
+
+def _is_str_constant(node: ast.expr) -> bool:
+    return isinstance(node, ast.Constant) and isinstance(node.value, str)
+
+
+def _keyword_value(call: ast.Call, name: str) -> ast.expr | None:
+    for keyword in call.keywords:
+        if keyword.arg == name:
+            return keyword.value
+    return None
+
+
+def _keyword_is_true(call: ast.Call, name: str) -> bool:
+    value = _keyword_value(call, name)
+    return isinstance(value, ast.Constant) and value.value is True
+
+
+def _check_yaml_load_call(call: ast.Call) -> tuple[str, Severity, str, str] | None:
+    loader = _keyword_value(call, "Loader")
+    if loader is None and len(call.args) >= 2:
+        loader = call.args[1]
+    loader_name: str | None = None
+    if isinstance(loader, ast.Attribute):
+        loader_name = loader.attr
+    elif isinstance(loader, ast.Name):
+        loader_name = loader.id
+    if loader_name is not None and loader_name.endswith("SafeLoader"):
+        return None
+    if loader_name in ("Loader", "UnsafeLoader"):
+        return (
+            "yaml-unsafe-loader",
+            "CRITICAL",
+            "yaml.load() with unsafe Loader explicitly set — this allows "
+            "arbitrary Python code execution when parsing YAML",
+            _YAML_UNSAFE_LOADER_REMEDIATION,
+        )
+    return (
+        "yaml-load-without-safeloader",
+        "HIGH",
+        "yaml.load() without SafeLoader detected — PyYAML's default loader "
+        "can execute arbitrary Python when parsing untrusted YAML",
+        _YAML_SAFE_LOADER_REMEDIATION,
+    )
+
+
+def _check_model_download_call(call: ast.Call) -> Iterator[tuple[str, Severity, str, str]]:
+    if call.args and not _is_str_constant(call.args[0]):
+        yield (
+            "model-id-variable",
+            "MEDIUM",
+            "from_pretrained() called with a variable model ID — the model "
+            "source cannot be verified statically",
+            _MODEL_ID_VARIABLE_REMEDIATION,
+        )
+    if _keyword_value(call, "revision") is None:
+        yield (
+            "missing-revision",
+            "MEDIUM",
+            "Model loaded without pinning a revision or commit hash — the "
+            "model weights could change between runs without notice",
+            _MISSING_REVISION_REMEDIATION,
+        )
+
+
+def _scan_call(
+    call: ast.Call, aliases: dict[str, str], has_hf_import: bool
+) -> Iterator[tuple[str, Severity, str, str]]:
+    """Yield (rule, severity, message, remediation) for one call node."""
+    name = _resolved_call_name(call.func, aliases)
+
+    if name in _SIMPLE_CALL_RULES:
+        yield _SIMPLE_CALL_RULES[name]
+    elif name == "torch.load" and not _keyword_is_true(call, "weights_only"):
+        yield (
+            "torch-load-without-weights-only",
+            "LOW",
+            "torch.load() call without weights_only=True",
+            _TORCH_REMEDIATION,
+        )
+    elif name == "numpy.load" and _keyword_is_true(call, "allow_pickle"):
+        yield (
+            "numpy-allow-pickle",
+            "HIGH",
+            "numpy.load() with allow_pickle=True detected — allows arbitrary "
+            "Python object deserialisation",
+            _NUMPY_ALLOW_PICKLE_REMEDIATION,
+        )
+    elif name == "yaml.load":
+        if (result := _check_yaml_load_call(call)) is not None:
+            yield result
+    elif name in ("eval", "exec"):
+        if call.args and not _is_str_constant(call.args[0]):
+            yield (
+                f"{name}-non-literal",
+                "CRITICAL",
+                f"{name}() called with a non-literal argument — {name} executes "
+                "arbitrary Python code",
+                _EVAL_REMEDIATION if name == "eval" else _EXEC_REMEDIATION,
+            )
+    elif (name is not None and name.rsplit(".", 1)[-1] == "hf_hub_download") or (
+        # Only flag `X.from_pretrained(...)` when the file actually uses a
+        # HuggingFace library — a project's own from_pretrained classmethod
+        # (e.g. nanoGPT's GPT.from_pretrained) is not a supply chain risk.
+        has_hf_import
+        and isinstance(call.func, ast.Attribute)
+        and call.func.attr == "from_pretrained"
+    ):
+        yield from _check_model_download_call(call)
+
+    if _keyword_is_true(call, "shell"):
+        yield (
+            "subprocess-shell-true",
+            "HIGH",
+            "subprocess called with shell=True — shell=True enables command "
+            "injection if any part of the command is user-controlled",
+            _SUBPROCESS_SHELL_REMEDIATION,
+        )
+    if _keyword_is_true(call, "trust_remote_code"):
+        yield (
+            "trust-remote-code",
+            "CRITICAL",
+            "trust_remote_code=True detected — this allows the model repository "
+            "to execute arbitrary Python code on your machine during model loading",
+            _TRUST_REMOTE_CODE_REMEDIATION,
+        )
+
+
+def _scan_tree(tree: ast.AST) -> list[_CodeFinding]:
+    aliases, has_hf_import = _collect_imports(tree)
+    results: list[_CodeFinding] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        for rule, severity, message, remediation in _scan_call(node, aliases, has_hf_import):
+            results.append(
+                (rule, severity, message, remediation, node.lineno, node.col_offset + 1)
+            )
+    results.sort(key=lambda item: (item[4], item[5]))
+    return results
+
+
+def _scan_source_with_regex(text: str) -> list[_CodeFinding]:
+    """Line/regex scan used only when Python source cannot be parsed."""
+    results: list[_CodeFinding] = []
+    for line_number, line in enumerate(text.splitlines(), start=1):
+        for rule, severity, message, remediation, column in _scan_line(line):
+            results.append((rule, severity, message, remediation, line_number, column))
+    for rule, severity, message, remediation, line_number, column in _scan_calls(text):
+        results.append((rule, severity, message, remediation, line_number, column))
+    results.sort(key=lambda item: (item[4], item[5]))
+    return results
+
+
+def _scan_python_source(text: str) -> list[_CodeFinding]:
+    """Scan Python source text, preferring AST analysis over regexes."""
+    try:
+        tree = ast.parse(text)
+    except (SyntaxError, ValueError):
+        return _scan_source_with_regex(text)
+    return _scan_tree(tree)
+
+
+_MAGIC_LINE_RE = re.compile(r"\s*[%!?]")
+
+
+def _blank_magic_lines(text: str) -> str:
+    """Blank out IPython magic/shell lines so a notebook cell parses as
+    plain Python; the line count (and thus line numbers) is preserved."""
+    return "\n".join(
+        "" if _MAGIC_LINE_RE.match(line) else line for line in text.splitlines()
+    )
+
+
+def _scan_cell_source(text: str) -> list[_CodeFinding]:
+    """Scan one notebook code cell: AST if it parses (retrying with IPython
+    magics blanked out), regex fallback otherwise."""
+    for candidate in (text, _blank_magic_lines(text)):
+        try:
+            tree = ast.parse(candidate)
+        except (SyntaxError, ValueError):
+            continue
+        return _scan_tree(tree)
+    return _scan_source_with_regex(text)
+
+
 def scan_file(path: Path) -> list[Finding]:
     """Scan a single file for unsafe model files, deserialisation calls, or
     unverified model-loading patterns."""
@@ -509,16 +795,10 @@ def _scan_text_file(path: Path) -> list[Finding]:
     if has_ignore_file_marker(text):
         return []
 
-    findings = []
-    for line_number, line in enumerate(text.splitlines(), start=1):
-        for rule, severity, message, remediation, column in _scan_line(line):
-            findings.append(
-                _build_finding(rule, severity, message, remediation, path, line_number, column)
-            )
-    for rule, severity, message, remediation, line_number, column in _scan_calls(text):
-        findings.append(
-            _build_finding(rule, severity, message, remediation, path, line_number, column)
-        )
+    findings = [
+        _build_finding(rule, severity, message, remediation, path, line_number, column)
+        for rule, severity, message, remediation, line_number, column in _scan_python_source(text)
+    ]
     return filter_suppressed(findings, text)
 
 
@@ -539,15 +819,7 @@ def _scan_notebook(path: Path) -> list[Finding]:
         source = cell.get("source", "")
         text = "".join(source) if isinstance(source, list) else source
 
-        for line_number, line in enumerate(text.splitlines(), start=1):
-            for rule, severity, message, remediation, column in _scan_line(line):
-                findings.append(
-                    _build_finding(
-                        rule, severity, message, remediation, path, line_number, column,
-                        cell=cell_number,
-                    )
-                )
-        for rule, severity, message, remediation, line_number, column in _scan_calls(text):
+        for rule, severity, message, remediation, line_number, column in _scan_cell_source(text):
             findings.append(
                 _build_finding(
                     rule, severity, message, remediation, path, line_number, column,

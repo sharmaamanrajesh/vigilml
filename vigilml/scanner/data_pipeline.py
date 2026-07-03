@@ -189,14 +189,15 @@ def _check_unverified_dataset(text: str) -> Iterator[tuple[str, Severity, str, s
 
 _PANDAS_LOAD_RE = re.compile(r"pd\.(?:read_csv|read_json|read_parquet|DataFrame)\s*\(")
 
-# Longer/compound terms are listed before the shorter substrings they
-# contain (e.g. "phone_number" before "phone") purely for readability —
-# match correctness doesn't depend on the order since we only care whether
-# a line contains *any* indicator, not which one specifically.
+# Keywords must appear as whole snake_case segments: `user_phone` and
+# `df["phone_number"]` match, but identifiers that merely contain a keyword
+# as a substring (`allocation`, `endobj`) do not. "location" is deliberately
+# absent — in ML code it almost always means `map_location`, a file path, or
+# a memory location, not a person's whereabouts.
 _PII_KEYWORD_RE = re.compile(
-    r"(?i)\b\w*(?:social_security|credit_card|date_of_birth|phone_number|"
+    r"(?i)(?<![a-z0-9])(?:social_security|credit_card|date_of_birth|phone_number|"
     r"email_address|home_address|ip_address|national_id|tax_id|ssn|dob|phone|"
-    r"gps|location|salary|medical|diagnosis|prescription)\w*\b"
+    r"gps|salary|medical|diagnosis|prescription)(?![a-z0-9])"
 )
 
 _PII_COLUMN_REMEDIATION = (
@@ -217,10 +218,6 @@ def _has_pandas_load(text: str) -> bool:
     return bool(_PANDAS_LOAD_RE.search(text))
 
 
-def _has_pii_reference(text: str) -> bool:
-    return bool(_PII_KEYWORD_RE.search(text))
-
-
 def _check_pii_columns(text: str) -> Iterator[tuple[str, Severity, str, str, int]]:
     if not _has_pandas_load(text):
         return
@@ -239,9 +236,16 @@ def _check_pii_columns(text: str) -> Iterator[tuple[str, Severity, str, str, int
 
 
 def _check_pii_logging(text: str) -> Iterator[tuple[str, Severity, str, str, int]]:
-    if not _has_pii_reference(text):
-        return
+    """Flag logging calls whose own arguments reference a PII keyword.
+
+    The keyword must appear inside the call's argument list — a PII
+    reference elsewhere in the file (e.g. a dataframe column defined
+    earlier) must not implicate every print() in the module.
+    """
     for match in _LOGGING_CALL_RE.finditer(text):
+        args = _extract_paren_args(text, match.end())
+        if args is None or not _PII_KEYWORD_RE.search(args):
+            continue
         line, _ = _line_and_column(text, match.start())
         yield (
             "pii-logging",

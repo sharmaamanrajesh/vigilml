@@ -54,9 +54,22 @@ _LLM_SINK_GENERIC_RE = re.compile(
     r"(?i)\w*(?:llm|chat|completion|generate|prompt|inference)\w*\s*\("
 )
 
+# A file only counts as containing an LLM sink if it imports an LLM SDK or
+# framework. Without this gate, any ML repo with a local `model.generate()`
+# sampling loop (nanoGPT, most training codebases) would count as an LLM
+# app and every file read in it would be flagged as an injection risk.
+_LLM_IMPORT_RE = re.compile(
+    r"(?m)^\s*(?:import|from)\s+(?:openai|anthropic|langchain\w*|llama_index|"
+    r"litellm|cohere|mistralai|groq|ollama|google\.generativeai|vertexai|"
+    r"guidance|semantic_kernel|dspy|haystack)\b"
+)
+
 
 def _has_llm_sink(text: str) -> bool:
-    """True if `text` contains any call site that looks like an LLM API call."""
+    """True if `text` imports an LLM SDK and contains a call site that
+    looks like an LLM API call."""
+    if not _LLM_IMPORT_RE.search(text):
+        return False
     return any(pattern.search(text) for pattern in _LLM_SINK_LITERAL_RES) or bool(
         _LLM_SINK_GENERIC_RE.search(text)
     )
