@@ -2,7 +2,7 @@
 
 Security scanner for the AI development lifecycle.
 
-[![PyPI version](https://img.shields.io/pypi/v/vigilml)](https://pypi.org/project/vigilml/) [![Python versions](https://img.shields.io/pypi/pyversions/vigilml)](https://pypi.org/project/vigilml/) [![License](https://img.shields.io/badge/license-MIT-green)](https://github.com/sharmaamanrajesh/vigilml/blob/main/LICENSE) [![Tests](https://img.shields.io/badge/tests-375%20passing-brightgreen)](https://github.com/sharmaamanrajesh/vigilml)
+[![PyPI version](https://img.shields.io/pypi/v/vigilml)](https://pypi.org/project/vigilml/) [![Python versions](https://img.shields.io/pypi/pyversions/vigilml)](https://pypi.org/project/vigilml/) [![License](https://img.shields.io/badge/license-MIT-green)](https://github.com/sharmaamanrajesh/vigilml/blob/main/LICENSE) [![Tests](https://img.shields.io/badge/tests-393%20passing-brightgreen)](https://github.com/sharmaamanrajesh/vigilml)
 
 ```bash
 pip install vigilml && vigilml scan .
@@ -20,6 +20,7 @@ Requires Python 3.10+.
 - [Real findings on real repos](#real-findings-on-real-repos)
 - [Available scanners](#available-scanners)
 - [Contributing](#contributing)
+- [What changed in 0.2.4](#what-changed-in-024)
 - [Licence](#licence)
 
 ## What it catches
@@ -32,7 +33,7 @@ lists specific detectors from each scanner, not a general summary.
 |--------------------------|-------------------------------------------------------|--------------|
 | Hardcoded API keys       | `openai-api-key`, `aws-secret-key`, `mongodb-connection-string` patterns in `.py`, `.ipynb`, `.env`, `Dockerfile`, and 20+ other file types | CRITICAL     |
 | Private keys and tokens  | RSA/EC/OpenSSH private key headers, Slack tokens, generic `SECRET`/`KEY`/`TOKEN`-named variables | CRITICAL/MEDIUM |
-| Unsafe deserialisation   | `.pkl`/`.pickle`/`.joblib`/`.dill` files on disk, `pickle.load()`, `torch.load()` without `weights_only=True` | HIGH         |
+| Unsafe deserialisation   | `.pkl`/`.pickle`/`.joblib`/`.dill` files on disk, `pickle.load()`, `torch.load()` without `weights_only=True`. Uses AST parsing for accurate detection — no false positives on `model.eval()`, docstrings, or comments | HIGH         |
 | Arbitrary code execution | `trust_remote_code=True`, `eval()`/`exec()` with a non-literal argument, `yaml.load()` without `SafeLoader` | CRITICAL     |
 | Cloud misconfiguration   | S3 `ACL="public-read"`, S3 uploads without server-side encryption, IAM `"Action": "*"` wildcards | HIGH         |
 | Insecure serving/build   | Docker containers running as root, Flask/FastAPI routes with no auth check, `.run(debug=True)` | HIGH         |
@@ -176,7 +177,7 @@ jobs:
 
 | Repo                                | Author          | Stars | Total findings | Most notable finding type          |
 |--------------------------------------|-----------------|-------|-----------------|--------------------------------------|
-| nanoGPT                              | Andrej Karpathy | 38K+  | 42               | `pii-logging` (14 occurrences)       |
+| nanoGPT                              | Andrej Karpathy | 38K+  | 12               | Unsafe pickle, `torch.load()` without `weights_only`, unchecked downloads |
 | Hands-On ML (handson-ml3)            | Aurelien Geron  | 28K+  | 104              | `env-var-in-llm-prompt` (23 occurrences) |
 | PyTorch-GAN                          | -               | 16K+  | 83               | `torch-load-without-weights-only` (37 occurrences) |
 | Approaching (Almost) Any ML Problem  | Abhishek Thakur | 11K+  | 443              | Every finding is a dependency CVE (443 of 443) |
@@ -201,6 +202,19 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for setup, code standards, and
 how to report a false positive. Open an issue at
 [github.com/sharmaamanrajesh/vigilml/issues](https://github.com/sharmaamanrajesh/vigilml/issues)
 before starting any large change.
+
+## What changed in 0.2.4
+
+- Switched from regex to AST-based scanning for Python files — eliminates
+  false positives on `model.eval()`, docstrings, and comments
+- Added import alias resolution (`import pickle as pkl` is now detected
+  correctly)
+- Tightened PII logging rule — only fires when the logging call contains
+  PII terms directly
+- Prompt injection scanner now requires an external LLM SDK import — local
+  inference loops are no longer flagged
+- Credential detector now matches whole identifier segments — `tokenized`
+  no longer matches `TOKEN`
 
 ## Licence
 
