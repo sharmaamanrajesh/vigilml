@@ -1,0 +1,129 @@
+version: 1
+
+# VigilML default configuration
+# This file is checked into the repo as the project default.
+# Teams can override it by adding their own .vigilml.yml at the project root.
+# Docs: https://docs.vigilml.ai/configuration
+
+scan:
+  # Paths to exclude from scanning (glob patterns)
+  exclude_paths:
+    - ".git/"
+    - "__pycache__/"
+    - "*.pyc"
+    - ".venv/"
+    - "venv/"
+    - "env/"
+    - "node_modules/"
+    - "dist/"
+    - "build/"
+    - "*.egg-info/"
+
+  # File extensions to scan (informational — each scanner also defines its
+  # own extension set in code; kept here as a single reference list).
+  include_extensions:
+    - ".py"
+    - ".ipynb"
+    - ".env"
+    - ".yaml"
+    - ".yml"
+    - ".json"
+    - ".toml"
+    - ".cfg"
+    - ".ini"
+    - ".conf"
+    - ".sh"
+    - ".bash"
+    - ".zsh"
+    - ".dockerfile"
+    - ".tfvars"
+    - ".properties"
+    - ".pem"
+    - ".key"
+
+  # Filenames (no extension match needed) also scanned by credentials.py / cloud.py
+  include_filenames:
+    - ".env"
+    - ".env.local"
+    - ".env.production"
+    - ".env.staging"
+    - ".env.dev"
+    - "Dockerfile"
+
+rules:
+  credentials:
+    enabled: true
+    # Credential types to detect
+    patterns:
+      - openai_api_key
+      - anthropic_api_key
+      - huggingface_token
+      - aws_access_key
+      - aws_secret_key
+      - gcp_service_account
+      - github_token
+      - azure_connection_string
+
+  model_files:
+    enabled: true
+    # Flag these extensions as unsafe serialisation formats
+    unsafe_extensions:
+      - ".pkl"
+      - ".pickle"
+      - ".joblib"
+    # Flag these code patterns
+    unsafe_patterns:
+      - torch_load_without_weights_only
+      - pickle_load
+      - pickle_loads
+      - joblib_load_untrusted
+
+  cloud:
+    enabled: true
+    patterns:
+      - s3_public_write
+      - world_readable_permissions
+      - hardcoded_bucket_names
+
+  dependencies:
+    enabled: true
+    # Minimum severity to report (CRITICAL, HIGH, MEDIUM, LOW)
+    min_severity: LOW
+    # Package managers to check
+    lockfiles:
+      - "requirements.txt"
+      - "requirements*.txt"
+      - "pyproject.toml"
+      - "Pipfile"
+      - "environment.yml"
+      - "conda.yml"
+
+  prompt_injection:
+    enabled: true
+
+  data_pipeline:
+    enabled: true
+
+  notebook_risks:
+    enabled: true
+
+# Inline suppression comments — # vigilml: ignore / ignore-start / ignore-end
+# / ignore-file.
+suppression:
+  allow_inline_ignore: true
+  allow_block_ignore: true
+  allow_file_ignore: true
+  require_reason: false
+
+output:
+  # Show remediation guidance for each finding
+  show_remediation: true
+  # Group findings by severity in terminal output
+  group_by_severity: true
+  # Show a summary panel at the end
+  show_summary: true
+
+telemetry:
+  # VigilML collects anonymous usage statistics to improve the product.
+  # Set to false to opt out completely. No credential data is ever sent.
+  enabled: false

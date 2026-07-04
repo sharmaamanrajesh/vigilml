@@ -53,9 +53,9 @@ tests/fixtures/notebook_specialist/
 .claude/
 PROGRESS.md
 AGENTS.md
+CONTRIBUTING.md
 scripts/
 tests/
 docs/
 .github/
 CLAUDE.md
-.vigilml.yml

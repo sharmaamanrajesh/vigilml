@@ -198,10 +198,10 @@ All repos scanned with `vigilml scan .` on unmodified public code.
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for setup, code standards, and
-how to report a false positive. Open an issue at
+Open an issue at
 [github.com/sharmaamanrajesh/vigilml/issues](https://github.com/sharmaamanrajesh/vigilml/issues)
-before starting any large change.
+to report a false positive or propose a change before starting any large
+work.
 
 ## What changed in 0.2.4
 
